@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SentinelScan – Analyzer Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  * { font-family: 'Inter', sans-serif; box-sizing: border-box; }
+  body { background: #09090b; margin: 0; }
+  .animate-in { animation: fadeSlideIn 0.45s ease both; }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .skeleton-pulse { animation: skPulse 1.4s ease-in-out infinite; }
+  @keyframes skPulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+  }
+  .bar-slide { animation: barSlide 1.6s ease-in-out infinite; }
+  @keyframes barSlide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+  .spin { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .gauge-arc { transition: stroke-dashoffset 1s cubic-bezier(0.4,0,0.2,1); }
+  input::placeholder, textarea::placeholder { color: #3f3f46; }
+  textarea { font-family: 'JetBrains Mono', 'Fira Code', monospace, sans-serif; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #18181b; }
+  ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 9999px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+// ─── Mock Data ────────────────────────────────────────────────────────────────
+const MOCK_LINK = {
+  status: "warning", score: 61,
+  summary: "Suspicious redirect chain detected. Domain was registered fewer than 30 days ago and routes through an untrusted CDN intermediary.",
+  flags: [
+    { severity: "high",   label: "Newly registered domain — only 12 days old" },
+    { severity: "high",   label: "3-hop redirect chain via unverified intermediary" },
+    { severity: "medium", label: "Missing HSTS header on final destination" },
+    { severity: "low",    label: "No valid WHOIS contact information found" },
+  ],
+  timeline: [
+    { step: 1, label: "https://bit.ly/3xShortUrl",        type: "redirect"    },
+    { step: 2, label: "https://track.suspiciouscdn.io/r", type: "redirect"    },
+    { step: 3, label: "https://landing.newdomain12.com/", type: "destination" },
+  ],
+};
+const MOCK_EMAIL = {
+  status: "dangerous", score: 18,
+  summary: "SPF and DKIM failures detected. The sender IP appears on 2 global blocklists. High probability of phishing or spoofed identity.",
+  flags: [
+    { severity: "high",   label: "SPF record: FAIL — envelope sender mismatch" },
+    { severity: "high",   label: "DKIM signature is invalid or missing" },
+    { severity: "high",   label: "Sender IP listed on Spamhaus & Barracuda blocklists" },
+    { severity: "medium", label: "Reply-To domain differs from From domain" },
+    { severity: "low",    label: "DMARC policy set to 'none' — no enforcement" },
+  ],
+  timeline: [
+    { step: 1, label: "Received from: 45.33.32.156 (Unknown host)", type: "relay"       },
+    { step: 2, label: "Relayed via: smtp.bulkmailer.xyz",           type: "relay"       },
+    { step: 3, label: "Delivered to: mx1.yourdomain.com",          type: "destination" },
+  ],
+};
+
+// ─── Config maps ──────────────────────────────────────────────────────────────
+const RISK = {
+  clean:     { label: "Clean",     textCls: "#34d399", ringColor: "#10b981", bgCls: "#10b981", glowCls: "0 0 32px rgba(16,185,129,0.25)", badgeBg: "rgba(16,185,129,0.12)", badgeBorder: "rgba(16,185,129,0.3)", badgeText: "#34d399" },
+  warning:   { label: "Warning",   textCls: "#fbbf24", ringColor: "#f59e0b", bgCls: "#f59e0b", glowCls: "0 0 32px rgba(245,158,11,0.25)",  badgeBg: "rgba(245,158,11,0.12)",  badgeBorder: "rgba(245,158,11,0.3)",  badgeText: "#fbbf24" },
+  dangerous: { label: "Dangerous", textCls: "#f87171", ringColor: "#ef4444", bgCls: "#ef4444", glowCls: "0 0 32px rgba(239,68,68,0.25)",   badgeBg: "rgba(239,68,68,0.12)",   badgeBorder: "rgba(239,68,68,0.3)",   badgeText: "#f87171" },
+};
+const SEV = {
+  high:   { bg: "rgba(239,68,68,0.10)",   border: "rgba(239,68,68,0.22)",   text: "#f87171" },
+  medium: { bg: "rgba(245,158,11,0.10)",  border: "rgba(245,158,11,0.22)",  text: "#fbbf24" },
+  low:    { bg: "rgba(63,63,70,0.50)",    border: "rgba(82,82,91,0.40)",    text: "#a1a1aa" },
+};
+const STEP_TYPE = {
+  redirect:    { bg: "rgba(245,158,11,0.10)",  border: "rgba(245,158,11,0.22)",  text: "#fbbf24", dot: "#f59e0b" },
+  relay:       { bg: "rgba(99,102,241,0.10)",  border: "rgba(99,102,241,0.22)",  text: "#a5b4fc", dot: "#6366f1" },
+  destination: { bg: "rgba(39,39,42,0.80)",    border: "rgba(63,63,70,0.40)",    text: "#a1a1aa", dot: "#71717a" },
+};
+
+// ─── SVG Icons ────────────────────────────────────────────────────────────────
+const Ico = {
+  link: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>,
+  mail: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>,
+  shield: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+  warn: () => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>,
+  chevron: ({open}) => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{transform: open ? "rotate(180deg)" : "rotate(0deg)", transition:"transform 0.22s ease"}}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/></svg>,
+  spin: () => <svg className="spin" width="15" height="15" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" style={{opacity:0.2}}/><path fill="currentColor" style={{opacity:0.8}} d="M4 12a8 8 0 018-8v8H4z"/></svg>,
+  dot: ({color}) => <span style={{width:8, height:8, borderRadius:"50%", background:color, display:"inline-block", boxShadow:`0 0 8px ${color}88`}} />,
+  check: () => <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg>,
+};
+
+// ─── Gauge ────────────────────────────────────────────────────────────────────
+function Gauge({ score, status }) {
+  const cfg = RISK[status];
+  const R = 44, C = 2 * Math.PI * R;
+  const offset = C - (score / 100) * C;
+  return (
+    <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:14}}>
+      <div style={{position:"relative", width:120, height:120, borderRadius:"50%", boxShadow: `0 0 0 3px ${cfg.ringColor}44, ${cfg.glowCls}`}}>
+        <svg style={{position:"absolute", inset:0, width:"100%", height:"100%", transform:"rotate(-90deg)"}} viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r={R} fill="none" stroke="#27272a" strokeWidth="7"/>
+          <circle cx="50" cy="50" r={R} fill="none" stroke={cfg.ringColor} strokeWidth="7"
+            strokeDasharray={C} strokeDashoffset={offset}
+            strokeLinecap="round" className="gauge-arc"/>
+        </svg>
+        <div style={{position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
+          <span style={{fontSize:28, fontWeight:700, color:cfg.textCls, lineHeight:1, fontVariantNumeric:"tabular-nums"}}>{score}</span>
+          <span style={{fontSize:10, color:"#52525b", letterSpacing:"0.1em", textTransform:"uppercase", marginTop:2}}>/ 100</span>
+        </div>
+      </div>
+      <span style={{fontSize:10, fontWeight:600, letterSpacing:"0.15em", textTransform:"uppercase", padding:"4px 12px", borderRadius:9999, background: cfg.badgeBg, color: cfg.badgeText, border:`1px solid ${cfg.badgeBorder}`}}>
+        {cfg.label}
+      </span>
+    </div>
+  );
+}
+
+// ─── Flag List ─────────────────────────────────────────────────────────────────
+function FlagList({ flags }) {
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:8}}>
+      <p style={{fontSize:10, fontWeight:600, letterSpacing:"0.15em", textTransform:"uppercase", color:"#52525b", marginBottom:4}}>Warning Flags</p>
+      {flags.map((f,i) => {
+        const s = SEV[f.severity];
+        return (
+          <div key={i} style={{display:"flex", alignItems:"flex-start", gap:8}}>
+            <span style={{flexShrink:0, marginTop:1, fontSize:9, fontWeight:700, letterSpacing:"0.12em", textTransform:"uppercase", padding:"3px 8px", borderRadius:9999, background:s.bg, color:s.text, border:`1px solid ${s.border}`}}>
+              {f.severity}
+            </span>
+            <p style={{fontSize:12.5, color:"#d4d4d8", lineHeight:1.5, margin:0}}>{f.label}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Timeline ─────────────────────────────────────────────────────────────────
+function Timeline({ steps, mode }) {
+  const heading = mode === "link" ? "Redirect Chain" : "Mail Relay Path";
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:10}}>
+      <p style={{fontSize:10, fontWeight:600, letterSpacing:"0.15em", textTransform:"uppercase", color:"#52525b", marginBottom:2}}>{heading}</p>
+      {steps.map((s,i) => {
+        const t = STEP_TYPE[s.type];
+        return (
+          <div key={i} style={{display:"flex", alignItems:"flex-start", gap:10}}>
+            <div style={{display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0}}>
+              <div style={{width:24, height:24, borderRadius:"50%", background:t.bg, border:`1px solid ${t.border}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:700, color:t.text, zIndex:1}}>
+                {s.step}
+              </div>
+              {i < steps.length - 1 && <div style={{width:1, height:22, background:"#27272a", margin:"2px 0"}} />}
+            </div>
+            <div style={{paddingBottom: i < steps.length-1 ? 0 : 0, paddingTop:2, flex:1, minWidth:0}}>
+              <p style={{fontSize:11, color:"#a1a1aa", fontFamily:"'Fira Code', 'Courier New', monospace", margin:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{s.label}</p>
+              <span style={{display:"inline-block", marginTop:4, fontSize:9, fontWeight:600, letterSpacing:"0.12em", textTransform:"uppercase", padding:"2px 8px", borderRadius:9999, background:t.bg, color:t.text, border:`1px solid ${t.border}`}}>
+                {s.type}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Results Panel ─────────────────────────────────────────────────────────────
+function ResultsPanel({ results, mode }) {
+  const cfg = RISK[results.status];
+  const now = new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  return (
+    <div className="animate-in" style={{marginTop:20, borderRadius:16, border:"1px solid #27272a", background:"rgba(24,24,27,0.85)", backdropFilter:"blur(12px)", overflow:"hidden", boxShadow:"0 24px 64px rgba(0,0,0,0.5)"}}>
+      {/* Header */}
+      <div style={{padding:"12px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", borderBottom:"1px solid #27272a", background:"rgba(24,24,27,0.9)"}}>
+        <div style={{display:"flex", alignItems:"center", gap:10}}>
+          <Ico.dot color={cfg.bgCls} />
+          <span style={{fontSize:13, fontWeight:600, color:"#e4e4e7"}}>Analysis Complete</span>
+        </div>
+        <span style={{fontSize:11, color:"#52525b", fontFamily:"monospace"}}>{now}</span>
+      </div>
+      {/* Summary */}
+      <div style={{padding:"14px 20px", borderBottom:"1px solid rgba(39,39,42,0.7)"}}>
+        <p style={{margin:0, fontSize:12.5, color:"#a1a1aa", lineHeight:1.65}}>{results.summary}</p>
+      </div>
+      {/* Grid */}
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))"}}>
+        <div style={{padding:"28px 24px", display:"flex", justifyContent:"center", borderRight:"1px solid #27272a"}}>
+          <Gauge score={results.score} status={results.status} />
+        </div>
+        <div style={{padding:"24px 24px", borderRight:"1px solid #27272a"}}>
+          <FlagList flags={results.flags} />
+        </div>
+        <div style={{padding:"24px 24px"}}>
+          <Timeline steps={results.timeline} mode={mode} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Skeleton ─────────────────────────────────────────────────────────────────
+function Skeleton() {
+  return (
+    <div style={{marginTop:20, borderRadius:16, border:"1px solid #27272a", background:"rgba(24,24,27,0.85)", overflow:"hidden"}}>
+      <div style={{padding:"12px 20px", borderBottom:"1px solid #27272a", background:"rgba(24,24,27,0.9)", display:"flex", alignItems:"center", justifyContent:"space-between"}}>
+        <div className="skeleton-pulse" style={{height:12, width:140, borderRadius:6, background:"#27272a"}} />
+        <div className="skeleton-pulse" style={{height:10, width:60, borderRadius:6, background:"#27272a"}} />
+      </div>
+      <div style={{padding:"14px 20px", borderBottom:"1px solid rgba(39,39,42,0.7)"}}>
+        <div className="skeleton-pulse" style={{height:11, width:"80%", borderRadius:6, background:"#27272a", marginBottom:6}} />
+        <div className="skeleton-pulse" style={{height:11, width:"55%", borderRadius:6, background:"#27272a"}} />
+      </div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))"}}>
+        <div style={{padding:"28px 24px", display:"flex", flexDirection:"column", alignItems:"center", gap:12, borderRight:"1px solid #27272a"}}>
+          <div className="skeleton-pulse" style={{width:110, height:110, borderRadius:"50%", background:"#27272a"}} />
+          <div className="skeleton-pulse" style={{width:70, height:20, borderRadius:10, background:"#27272a"}} />
+        </div>
+        <div style={{padding:"24px 24px", borderRight:"1px solid #27272a"}}>
+          {[90,75,60,80].map((w,i)=>(
+            <div key={i} className="skeleton-pulse" style={{height:16, width:`${w}%`, borderRadius:8, background:"#27272a", marginBottom:10}} />
+          ))}
+        </div>
+        <div style={{padding:"24px 24px"}}>
+          {[1,2,3].map(i=>(
+            <div key={i} style={{display:"flex", gap:10, marginBottom:14, alignItems:"center"}}>
+              <div className="skeleton-pulse" style={{width:24, height:24, borderRadius:"50%", background:"#27272a", flexShrink:0}} />
+              <div className="skeleton-pulse" style={{height:12, flex:1, borderRadius:6, background:"#27272a"}} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Submit Button ─────────────────────────────────────────────────────────────
+function SubmitBtn({ loading, label }) {
+  return (
+    <button type="submit" disabled={loading} style={{display:"flex", alignItems:"center", justifyContent:"center", gap:8, padding:"0 22px", height:46, borderRadius:10, background: loading ? "#27272a" : "#4f46e5", color: loading ? "#71717a" : "#fff", fontSize:13, fontWeight:600, border:"none", cursor: loading ? "not-allowed" : "pointer", whiteSpace:"nowrap", flexShrink:0, boxShadow: loading ? "none" : "0 4px 20px rgba(99,102,241,0.30)", transition:"all 0.15s ease"}}>
+      {loading ? <><Ico.spin /> Analyzing…</> : label}
+    </button>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab]               = useState("link");
+  const [url, setUrl]               = useState("");
+  const [email, setEmail]           = useState("");
+  const [headers, setHeaders]       = useState("");
+  const [headersOpen, setHOpen]     = useState(false);
+  const [loading, setLoading]       = useState(false);
+  const [results, setResults]       = useState(null);
+  const [error, setError]           = useState("");
+  const [scanned, setScanned]       = useState(false);
+
+  const switchTab = (t) => { setTab(t); setResults(null); setError(""); setUrl(""); setEmail(""); setHeaders(""); setHOpen(false); setScanned(false); };
+
+  const validate = () => {
+    if (tab === "link") {
+      if (!url.trim()) return "Please enter a URL to scan.";
+      try { new URL(url.trim()); return ""; } catch { return "Please enter a valid URL (e.g. https://example.com)."; }
+    } else {
+      if (!email.trim()) return "Please enter an email address.";
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? "" : "Please enter a valid email address.";
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const err = validate();
+    if (err) { setError(err); return; }
+    setError(""); setResults(null); setLoading(true); setScanned(true);
+    await new Promise(r => setTimeout(r, 1900));
+    setResults(tab === "link" ? MOCK_LINK : MOCK_EMAIL);
+    setLoading(false);
+  };
+
+  const inputStyle = {
+    width:"100%", background:"rgba(39,39,42,0.7)", border:"1px solid #3f3f46", borderRadius:10,
+    paddingLeft:40, paddingRight:14, height:46, fontSize:13, color:"#e4e4e7",
+    outline:"none", transition:"border-color 0.15s, box-shadow 0.15s"
+  };
+  const onFocus = e => { e.target.style.borderColor="#6366f1"; e.target.style.boxShadow="0 0 0 3px rgba(99,102,241,0.18)"; };
+  const onBlur  = e => { e.target.style.borderColor="#3f3f46"; e.target.style.boxShadow="none"; };
+
+  return (
+    <div style={{minHeight:"100vh", background:"#09090b", color:"#e4e4e7", display:"flex", flexDirection:"column"}}>
+
+      {/* Nav */}
+      <header style={{borderBottom:"1px solid rgba(39,39,42,0.8)", background:"rgba(9,9,11,0.85)", backdropFilter:"blur(12px)", position:"sticky", top:0, zIndex:20}}>
+        <div style={{maxWidth:860, margin:"0 auto", padding:"0 24px", height:56, display:"flex", alignItems:"center", justifyContent:"space-between"}}>
+          <div style={{display:"flex", alignItems:"center", gap:10}}>
+            <div style={{width:30, height:30, borderRadius:8, background:"rgba(99,102,241,0.15)", border:"1px solid rgba(99,102,241,0.35)", display:"flex", alignItems:"center", justifyContent:"center", color:"#a5b4fc"}}>
+              <Ico.shield />
+            </div>
+            <span style={{fontSize:14, fontWeight:700, letterSpacing:"-0.02em", color:"#f4f4f5"}}>SentinelScan</span>
+            <span style={{fontSize:9, fontWeight:700, letterSpacing:"0.15em", textTransform:"uppercase", padding:"3px 8px", borderRadius:9999, background:"rgba(99,102,241,0.12)", color:"#a5b4fc", border:"1px solid rgba(99,102,241,0.25)"}}>Beta</span>
+          </div>
+          <div style={{display:"flex", alignItems:"center", gap:6}}>
+            <span style={{width:6, height:6, borderRadius:"50%", background:"#34d399", boxShadow:"0 0 8px #34d39980"}} />
+            <span style={{fontSize:11, color:"#52525b"}}>All systems operational</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main */}
+      <main style={{maxWidth:860, margin:"0 auto", width:"100%", padding:"0 24px", flex:1}}>
+
+        {/* Hero */}
+        <div style={{textAlign:"center", paddingTop:64, paddingBottom:40}}>
+          <p style={{fontSize:10, fontWeight:600, letterSpacing:"0.22em", textTransform:"uppercase", color:"#818cf8", marginBottom:12}}>
+            Threat Intelligence · Real-Time Analysis
+          </p>
+          <h1 style={{fontSize:"clamp(26px, 5vw, 38px)", fontWeight:800, letterSpacing:"-0.03em", color:"#fafafa", margin:"0 0 14px", lineHeight:1.15}}>
+            Analyze. Detect. Stay Safe.
+          </h1>
+          <p style={{fontSize:13.5, color:"#71717a", maxWidth:420, margin:"0 auto", lineHeight:1.7}}>
+            Instantly scan URLs for redirect chains and phishing signals, or verify email authenticity via SPF, DKIM, and DMARC.
+          </p>
+        </div>
+
+        {/* Tab Toggle */}
+        <div style={{display:"flex", justifyContent:"center", marginBottom:24}}>
+          <div style={{display:"inline-flex", padding:4, borderRadius:12, background:"#18181b", border:"1px solid #27272a"}}>
+            {[{id:"link", label:"Link Scanner", Icon: Ico.link}, {id:"email", label:"Email Threat Analyzer", Icon: Ico.mail}].map(({id,label,Icon}) => (
+              <button key={id} onClick={() => switchTab(id)} style={{display:"flex", alignItems:"center", gap:7, padding:"9px 18px", borderRadius:9, fontSize:13, fontWeight:500, border:"none", cursor:"pointer", transition:"all 0.18s ease",
+                background: tab===id ? "#27272a" : "transparent",
+                color: tab===id ? "#f4f4f5" : "#71717a",
+                boxShadow: tab===id ? "0 1px 4px rgba(0,0,0,0.3)" : "none"}}>
+                <span style={{color: tab===id ? "#818cf8" : "#3f3f46"}}><Icon /></span>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Form Card */}
+        <form onSubmit={handleSubmit} style={{borderRadius:16, border:"1px solid #27272a", background:"rgba(24,24,27,0.8)", backdropFilter:"blur(12px)", boxShadow:"0 24px 64px rgba(0,0,0,0.45)", overflow:"hidden"}}>
+          <div style={{padding:20, display:"flex", flexDirection:"column", gap:12}}>
+
+            {tab === "link" ? (
+              <div style={{display:"flex", gap:10, flexWrap:"wrap"}}>
+                <div style={{position:"relative", flex:"1 1 200px"}}>
+                  <span style={{position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:"#52525b", pointerEvents:"none"}}><Ico.link /></span>
+                  <input value={url} onChange={e=>{setUrl(e.target.value);setError("");}} placeholder="https://suspicious-link.com/path?ref=abc"
+                    style={inputStyle} onFocus={onFocus} onBlur={onBlur} />
+                </div>
+                <SubmitBtn loading={loading} label="Scan Link" />
+              </div>
+            ) : (
+              <>
+                <div style={{display:"flex", gap:10, flexWrap:"wrap"}}>
+                  <div style={{position:"relative", flex:"1 1 200px"}}>
+                    <span style={{position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:"#52525b", pointerEvents:"none"}}><Ico.mail /></span>
+                    <input value={email} onChange={e=>{setEmail(e.target.value);setError("");}} placeholder="sender@suspicious-domain.com"
+                      style={inputStyle} onFocus={onFocus} onBlur={onBlur} />
+                  </div>
+                  <SubmitBtn loading={loading} label="Verify Email" />
+                </div>
+
+                {/* Collapsible Headers */}
+                <div style={{borderRadius:10, border:"1px solid #27272a", overflow:"hidden"}}>
+                  <button type="button" onClick={()=>setHOpen(p=>!p)}
+                    style={{width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", background:"transparent", border:"none", cursor:"pointer", color: headersOpen ? "#a1a1aa" : "#52525b", fontSize:12.5, fontWeight:500, transition:"color 0.15s, background 0.15s"}}
+                    onMouseEnter={e=>{e.currentTarget.style.background="rgba(39,39,42,0.5)"; e.currentTarget.style.color="#a1a1aa";}}
+                    onMouseLeave={e=>{e.currentTarget.style.background="transparent"; e.currentTarget.style.color= headersOpen ? "#a1a1aa" : "#52525b";}}>
+                    <span>Paste Raw Email Headers <span style={{color:"#3f3f46", fontWeight:400}}>(Optional)</span></span>
+                    <Ico.chevron open={headersOpen} />
+                  </button>
+                  <div style={{maxHeight: headersOpen ? 240 : 0, opacity: headersOpen ? 1 : 0, overflow:"hidden", transition:"max-height 0.28s ease, opacity 0.22s ease"}}>
+                    <textarea value={headers} onChange={e=>setHeaders(e.target.value)} rows={7}
+                      placeholder={"Received: from mail.example.com ([45.33.32.156])\n  by mx.google.com with ESMTP;\nDKIM-Signature: v=1; a=rsa-sha256; d=example.com;\nX-Spam-Status: Yes, score=8.4\n..."}
+                      style={{width:"100%", background:"rgba(9,9,11,0.6)", borderTop:"1px solid #27272a", border:"none", borderTop:"1px solid #27272a", padding:"12px 14px", fontSize:11.5, color:"#71717a", fontFamily:"'Fira Code', 'Courier New', monospace", resize:"none", outline:"none", lineHeight:1.7, display:"block", boxSizing:"border-box"}} />
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div style={{padding:"0 20px 16px"}}>
+              <div style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, color:"#f87171", background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.20)", borderRadius:8, padding:"10px 14px"}}>
+                <Ico.warn />{error}
+              </div>
+            </div>
+          )}
+
+          {/* Progress bar */}
+          {loading && (
+            <div style={{height:2, background:"#18181b", overflow:"hidden", position:"relative"}}>
+              <div className="bar-slide" style={{position:"absolute", height:"100%", width:"40%", background:"linear-gradient(90deg, transparent, #6366f1, #8b5cf6, #6366f1, transparent)"}} />
+            </div>
+          )}
+        </form>
+
+        {/* Results / Skeleton / Hint */}
+        {loading && <Skeleton />}
+        {!loading && results && <ResultsPanel results={results} mode={tab} />}
+        {!loading && !scanned && (
+          <div style={{marginTop:28, display:"flex", justifyContent:"center"}}>
+            <p style={{fontSize:11.5, color:"#3f3f46", display:"flex", alignItems:"center", gap:6}}>
+              <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7"/></svg>
+              {tab==="link" ? "Paste any URL above to check for phishing, redirects, and domain threats." : "Enter a sender address to verify SPF, DKIM, DMARC, and blocklist status."}
+            </p>
+          </div>
+        )}
+
+        <div style={{height:60}} />
+      </main>
+
+      {/* Footer */}
+      <footer style={{borderTop:"1px solid rgba(39,39,42,0.5)", padding:"18px 24px"}}>
+        <div style={{maxWidth:860, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8}}>
+          <p style={{margin:0, fontSize:11, color:"#3f3f46"}}>© 2026 SentinelScan — No data is stored or logged.</p>
+          <div style={{display:"flex", gap:20, fontSize:11, color:"#3f3f46"}}>
+            {["Docs","API","Privacy"].map(l=><span key={l} style={{cursor:"pointer"}}>{l}</span>)}
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
